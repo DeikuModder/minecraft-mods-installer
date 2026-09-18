@@ -13,6 +13,9 @@ if (-not $?) { exit 1 }
 & ".venv\Scripts\python.exe" -m pip install pyinstaller
 if (-not $?) { exit 1 }
 
+& ".venv\Scripts\python.exe" version_info_gen.py
+if (-not $?) { exit 1 }
+
 Write-Host "Empaquetando el ejecutable..."
 if (Test-Path "dist\InstaladorMods") { Remove-Item "dist\InstaladorMods" -Recurse -Force }
 if (Test-Path "build\InstaladorMods") { Remove-Item "build\InstaladorMods" -Recurse -Force }

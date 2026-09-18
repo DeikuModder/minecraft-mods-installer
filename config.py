@@ -11,6 +11,7 @@ DEFAULT = {
     "folder_a": "",
     "folder_b": "",
     "role": "anfitrion",
+    "update_repo": "",
 }
 
 

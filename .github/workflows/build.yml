@@ -1,0 +1,56 @@
+name: Generar instalador y publicar versión
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Comprobación de sintaxis
+        run: python -m compileall -q app.py config.py remote.py server.py sync.py tunnel.py updates.py version.py
+
+      - name: Generar version_info.txt
+        run: python version_info_gen.py
+
+      - name: Instalar PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Empaquetar
+        run: python -m PyInstaller --onedir --noconsole --clean --name InstaladorMods --icon app.ico --version-file version_info.txt app.py
+
+      - name: Comprimir y calcular SHA-256
+        shell: pwsh
+        run: |
+          $vers = python -c "import version; print(version.APP_VERSION)"
+          if (-not $vers) { Write-Error "No se pudo leer la versión"; exit 1 }
+          Compress-Archive -Path dist\InstaladorMods -DestinationPath dist\InstaladorMods.zip -Force
+          $hash = (Get-FileHash dist\InstaladorMods.zip -Algorithm SHA256).Hash.ToLower()
+          Write-Output "VERSION=$vers" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publicar en GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:VERSION"
+          $repo = "${{ github.repository }}"
+          gh release view $tag --repo $repo 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist\InstaladorMods.zip --clobber --repo $repo
+            gh release edit $tag --notes "SHA256: $env:SHA256" --repo $repo
+          } else {
+            gh release create $tag dist\InstaladorMods.zip --notes "SHA256: $env:SHA256" --repo $repo
+          }

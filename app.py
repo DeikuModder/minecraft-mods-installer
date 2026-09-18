@@ -1,8 +1,11 @@
 import atexit
 import os
 import queue
+import shutil
 import subprocess
+import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -11,11 +14,13 @@ import remote
 import server
 import sync
 import tunnel
+import updates
+import version
 
 TITULO = "Instalador de Mods de Minecraft"
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 DEFAULT_B = os.path.join(APPDATA, ".minecraft", "mods")
-TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel")
+TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel", "update_listo")
 
 
 class TaskQueue:
@@ -80,6 +85,9 @@ class App(tk.Tk):
 
         self.task_local = TaskQueue(self, self._evento_local)
         self.task_sync = TaskQueue(self, self._evento_sync)
+        self.task_updates = TaskQueue(self, self._evento_updates)
+        self._upd_silencioso = False
+        self._upd_info = None
 
         self._crear_ui()
         self.var_a.trace_add("write", lambda *_: self._actualizar_boton())
@@ -88,6 +96,14 @@ class App(tk.Tk):
             var.trace_add("write", lambda *_: self._programar_guardado())
         self._actualizar_boton()
         self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
+        self._limpiar_temporales_updates()
+        self.after(1500, self._chequeo_inicial)
+
+    def _limpiar_temporales_updates(self):
+        if not getattr(sys, "frozen", False):
+            return
+        for nombre in ("InstaladorMods_Updater", "InstaladorMods_updates"):
+            shutil.rmtree(os.path.join(os.environ.get("TEMP", "."), nombre), ignore_errors=True)
 
     def _crear_ui(self):
         self.notebook = ttk.Notebook(self)
@@ -136,6 +152,20 @@ class App(tk.Tk):
 
         self.lbl_estado = ttk.Label(frm, text="", anchor="w", foreground="#555")
         self.lbl_estado.grid(row=6, column=0, sticky="ew")
+
+        fila_upd = ttk.Frame(frm)
+        fila_upd.grid(row=7, column=0, sticky="ew", pady=(14, 0))
+        ttk.Label(fila_upd, text="Versión " + version.APP_VERSION).pack(side="left")
+        self.btn_update = ttk.Button(
+            fila_upd, text="Buscar actualizaciones", command=self._buscar_actualizaciones
+        )
+        self.btn_update.pack(side="right")
+
+        self.lbl_update = ttk.Label(frm, text="", anchor="w", foreground="#333")
+        self.lbl_update.grid(row=8, column=0, sticky="ew", pady=(4, 0))
+
+        self.progress_upd = ttk.Progressbar(frm, mode="determinate", maximum=100, value=0)
+        self.progress_upd.grid(row=9, column=0, sticky="ew", pady=(4, 0))
 
     def _crear_ui_sync(self):
         barra = ttk.Frame(self.tab_sync)
@@ -630,6 +660,119 @@ class App(tk.Tk):
             self._rearmar_sync()
             self._mostrar_mensaje(msg["detalle"], ok=False)
 
+    def _chequeo_inicial(self):
+        if getattr(sys, "frozen", False):
+            self._chequear_version(silencioso=True)
+
+    def _chequear_version(self, silencioso=False):
+        if self.task_updates.busy:
+            return
+        self._upd_silencioso = silencioso
+        if not silencioso:
+            self.btn_update.config(state="disabled")
+            self.lbl_update.config(text="Buscando actualizaciones...")
+        self.task_updates.submit(lambda cola: self._trabajo_chequear(cola))
+
+    def _buscar_actualizaciones(self):
+        self._chequear_version()
+
+    def _trabajo_chequear(self, cola):
+        try:
+            info = updates.version_remota()
+            hay = bool(info) and updates.comparar_semver(info["version"], version.APP_VERSION) > 0
+            cola.put({"tipo": "upd_check", "info": info, "hay": hay})
+        except Exception as e:
+            cola.put({"tipo": "upd_check", "info": None, "hay": False, "error": str(e)})
+
+    def _evento_updates(self, msg):
+        t = msg["tipo"]
+        if t == "upd_check":
+            self.btn_update.config(state="normal")
+            if msg.get("error") and self._upd_silencioso:
+                return
+            if msg.get("hay"):
+                v = msg["info"]["version"]
+                self.lbl_update.config(text=f"Nueva versión {v} disponible.", foreground="#0a0")
+                if not self._upd_silencioso:
+                    self._mostrar_pregunta_actualizar(msg["info"])
+            else:
+                self.lbl_update.config(
+                    text="Estás en la última versión." if not self._upd_silencioso else ""
+                )
+        elif t == "update_progreso":
+            self.progress_upd.config(value=msg["pct"])
+            self.lbl_update.config(text=f"Descargando la actualización... {int(msg['pct'])}%")
+        elif t == "update_estado":
+            self.lbl_update.config(text=msg["texto"])
+        elif t == "update_listo":
+            self.btn_update.config(state="normal")
+            self.progress_upd.config(value=100)
+            self._aplicar_cambio(msg["nuevo_dir"])
+        elif t == "error":
+            self.btn_update.config(state="normal")
+            self.progress_upd.config(value=0)
+            self.lbl_update.config(text="", foreground="#333")
+            self._mostrar_mensaje(msg["detalle"], ok=False)
+
+    def _mostrar_pregunta_actualizar(self, info):
+        if messagebox.askyesno(
+            TITULO,
+            f"Hay una nueva versión ({info['version']}).\n\n¿Descargar e instalar ahora?",
+        ):
+            self._aplicar_actualizacion(info)
+
+    def _aplicar_actualizacion(self, info):
+        if self.task_updates.busy:
+            return
+        self.btn_update.config(state="disabled")
+        self.progress_upd.config(value=0)
+        self.lbl_update.config(text="Descargando la actualización...", foreground="#333")
+        self.task_updates.submit(lambda cola, i=info: self._trabajo_actualizar(cola, i))
+
+    def _trabajo_actualizar(self, cola, info):
+        base = os.path.join(os.environ.get("TEMP", "."), "InstaladorMods_updates")
+        shutil.rmtree(base, ignore_errors=True)
+        os.makedirs(base)
+        zip_ruta = os.path.join(base, "InstaladorMods.zip")
+        updates.descargar(
+            info["url"],
+            zip_ruta,
+            sha256=info.get("sha256"),
+            progreso=lambda d, t: cola.put(
+                {"tipo": "update_progreso", "pct": (100.0 * d / t) if t else 0}
+            ),
+        )
+        cola.put({"tipo": "update_estado", "texto": "Extrayendo la actualización..."})
+        extraido = os.path.join(base, "extraido")
+        updates.extraer(zip_ruta, extraido)
+        nuevo = updates.ubicar_exe(extraido)
+        cola.put({"tipo": "update_listo", "nuevo_dir": nuevo})
+
+    def _aplicar_cambio(self, nuevo_dir):
+        if not getattr(sys, "frozen", False):
+            self._mostrar_mensaje("En desarrollo el cambio se aplica al ejecutable empaquetado.")
+            return
+        destino = os.path.dirname(sys.executable)
+        upd_base = os.path.join(os.environ.get("TEMP", "."), "InstaladorMods_Updater")
+        shutil.rmtree(upd_base, ignore_errors=True)
+        shutil.copytree(destino, upd_base)
+        tmp_exe = os.path.join(upd_base, "InstaladorMods.exe")
+        pid = os.getpid()
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        subprocess.Popen(
+            [tmp_exe, "--aplicar-update", nuevo_dir, destino, str(pid)],
+            creationflags=flags,
+            close_fds=True,
+        )
+        tunnel.stop(self._tunnel_proc)
+        self._tunnel_proc = None
+        if self._server is not None:
+            s = self._server
+            self._server = None
+            threading.Thread(target=s.shutdown, daemon=True).start()
+        self._guardar_campos()
+        self.destroy()
+
 
 _LOCK = os.path.join(config.APP_DIR, "app.lock")
 
@@ -675,7 +818,27 @@ def _cerrojo():
         return True
 
 
+def _modo_updater(nuevo, destino, pid_orig):
+    tope = time.time() + 30
+    while time.time() < tope:
+        if not _pid_vivo(pid_orig):
+            break
+        time.sleep(0.5)
+    try:
+        exe = updates.aplicar_upgrade(nuevo, destino)
+    except Exception:
+        return 3
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    subprocess.Popen([exe], creationflags=flags, close_fds=True)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--aplicar-update" in sys.argv:
+        i = sys.argv.index("--aplicar-update")
+        nuevo, destino = sys.argv[i + 1], sys.argv[i + 2]
+        pid = int(sys.argv[i + 3]) if len(sys.argv) > i + 3 else 0
+        raise SystemExit(_modo_updater(nuevo, destino, pid))
     if not _cerrojo():
         root = tk.Tk()
         root.withdraw()
