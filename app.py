@@ -254,20 +254,38 @@ class App(tk.Tk):
         scroll.pack(side="right", fill="y")
         self.lista_mods.pack(side="left", fill="both", expand=True)
 
+        sec_borrar = ttk.LabelFrame(sec_b, text="Mods que se eliminarán al sincronizar:", padding=6)
+        self.sec_borrar = sec_borrar
+        marco_borrar = ttk.Frame(sec_borrar)
+        marco_borrar.pack(fill="both", expand=True)
+        scroll_b = ttk.Scrollbar(marco_borrar, orient="vertical")
+        self.lista_borrar = tk.Listbox(
+            marco_borrar,
+            height=3,
+            yscrollcommand=scroll_b.set,
+            activestyle="none",
+            exportselection=False,
+            width=48,
+            foreground="#a00",
+        )
+        scroll_b.config(command=self.lista_borrar.yview)
+        scroll_b.pack(side="right", fill="y")
+        self.lista_borrar.pack(side="left", fill="both", expand=True)
+
         fila_cmd = ttk.Frame(sec_b)
-        fila_cmd.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        fila_cmd.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.btn_sincronizar = ttk.Button(
             fila_cmd, text="Descargar mods", command=self._sincronizar, state="disabled"
         )
         self.btn_sincronizar.pack(side="left")
 
         self.progress_sync = ttk.Progressbar(sec_b, mode="determinate", maximum=100, value=0)
-        self.progress_sync.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+        self.progress_sync.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(10, 6))
 
         self.lbl_estado_sync = ttk.Label(sec_b, text="", anchor="w", foreground="#555")
-        self.lbl_estado_sync.grid(row=8, column=0, columnspan=2, sticky="ew")
+        self.lbl_estado_sync.grid(row=9, column=0, columnspan=2, sticky="ew")
         self.lbl_archivo_sync = ttk.Label(sec_b, text="", anchor="w", foreground="#555")
-        self.lbl_archivo_sync.grid(row=9, column=0, columnspan=2, sticky="ew")
+        self.lbl_archivo_sync.grid(row=10, column=0, columnspan=2, sticky="ew")
 
     def _mostrar_vista(self, rol):
         self.sec_anfitrion.pack_forget()
@@ -560,13 +578,14 @@ class App(tk.Tk):
         if not manifest:
             raise RuntimeError("El origen no tiene mods.")
         locales = sync.scan_sizes(b) if os.path.isdir(b) else {}
-        descargar, actualizar, iguales = remote.compare(locales, manifest)
+        descargar, actualizar, eliminar, iguales = remote.compare(locales, manifest)
         config.save({"last_origin_url": url})
         cola.put(
             {
                 "tipo": "respuesta",
                 "descargar": descargar,
                 "actualizar": actualizar,
+                "eliminar": eliminar,
                 "iguales": iguales,
                 "mods": len(manifest),
             }
@@ -575,10 +594,10 @@ class App(tk.Tk):
     def _sincronizar(self):
         if self.task_sync.busy:
             return
-        if not (self._cambios and (self._cambios[0] or self._cambios[1])):
+        if not (self._cambios and (self._cambios[0] or self._cambios[1] or self._cambios[2])):
             self._mostrar_mensaje("No hay mods pendientes. Pulsa 'Comprobar cambios' primero.")
             return
-        descargar, actualizar = self._cambios
+        descargar, actualizar, eliminar = self._cambios
         url = self.var_origen.get().strip()
         b = self.var_b.get().strip()
         self.btn_sincronizar.config(state="disabled")
@@ -589,17 +608,28 @@ class App(tk.Tk):
         self._tarea = "descargar"
         self._guardar_campos()
         self.task_sync.submit(
-            lambda cola, u=url, fb=b, d=descargar, ac=actualizar: self._trabajo_sincronizar(
-                cola, u, fb, d, ac
+            lambda cola, u=url, fb=b, d=descargar, ac=actualizar, el=eliminar: self._trabajo_sincronizar(
+                cola, u, fb, d, ac, el
             )
         )
 
-    def _trabajo_sincronizar(self, cola, url, b, descargar, actualizar):
+    def _trabajo_sincronizar(self, cola, url, b, descargar, actualizar, eliminar):
         def cb(done, total, name):
             cola.put({"tipo": "progreso", "hecho": done, "total": total, "archivo": name})
 
-        listos, actualizados = remote.sync_from_remote(url, b, descargar, actualizar, progress_cb=cb)
-        cola.put({"tipo": "resumen", "instalados": len(listos), "actualizados": len(actualizados)})
+        if eliminar:
+            cola.put({"tipo": "aviso_cliente", "texto": "Eliminando mods no presentes en el origen..."})
+        listos, actualizados, eliminados = remote.sync_from_remote(
+            url, b, descargar, actualizar, eliminar, progress_cb=cb
+        )
+        cola.put(
+            {
+                "tipo": "resumen",
+                "instalados": len(listos),
+                "actualizados": len(actualizados),
+                "eliminados": eliminados,
+            }
+        )
 
     def _evento_sync(self, msg):
         t = msg["tipo"]
@@ -614,29 +644,43 @@ class App(tk.Tk):
             self.lbl_estado_sync.config(text="Descargando...")
             self.lbl_archivo_sync.config(text=f"{msg['archivo']} ({msg['hecho']}/{total})")
         elif t == "respuesta":
-            desc, act = msg["descargar"], msg["actualizar"]
-            self._cambios = (desc, act)
-            if desc or act:
+            desc, act, eli = msg["descargar"], msg["actualizar"], msg["eliminar"]
+            self._cambios = (desc, act, eli)
+            if desc or act or eli:
                 partes = []
                 if desc:
                     partes.append(f"{len(desc)} mods nuevos encontrados")
                 if act:
                     partes.append(f"{len(act)} para actualizar")
+                if eli:
+                    partes.append(f"{len(eli)} para eliminar")
                 self.lbl_resultado.config(text=", ".join(partes) + ".")
             else:
                 self.lbl_resultado.config(text="No hay cambios: los mods están al día.")
             self.lista_mods.delete(0, tk.END)
             for nombre in desc:
                 self.lista_mods.insert(tk.END, nombre)
+            self.lista_borrar.delete(0, tk.END)
+            for nombre in eli:
+                self.lista_borrar.insert(tk.END, nombre)
+            if eli:
+                self.sec_borrar.grid()
+            else:
+                self.sec_borrar.grid_remove()
             self._rearmar_sync()
         elif t == "resumen":
             self.progress_sync.config(value=100)
+            self.sec_borrar.grid_remove()
             self._cambios = None
             self._rearmar_sync()
-            self._mostrar_mensaje(
+            eliminados = msg.get("eliminados") or []
+            texto = (
                 f"¡Descarga completada!\n\nDescargados: {msg['instalados']}\n"
                 f"Actualizados: {msg['actualizados']}"
             )
+            if eliminados:
+                texto += f"\nEliminados: {len(eliminados)}"
+            self._mostrar_mensaje(texto)
         elif t == "servidor":
             self._servidor_activo = True
             self.var_url_publica.set(msg["url"])

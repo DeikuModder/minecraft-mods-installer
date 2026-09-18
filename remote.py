@@ -76,7 +76,8 @@ def compare(locales, manifest):
     descargar = sorted(n for n in rem if n not in locales)
     actualizar = sorted(n for n, m in rem.items() if n in locales and m["size"] != locales[n])
     iguales = sorted(n for n, m in rem.items() if n in locales and m["size"] == locales[n])
-    return descargar, actualizar, iguales
+    eliminar = sorted(n for n in locales if n not in rem and n.lower().endswith(".jar"))
+    return descargar, actualizar, eliminar, iguales
 
 
 def _bajar_por_conn(conn, base, nombre, destino):
@@ -104,14 +105,28 @@ def _download(url, nombre, destino):
         conn.close()
 
 
-def sync_from_remote(url, carpeta, descargar, actualizar, progress_cb=None):
+def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progress_cb=None):
+    eliminar = [n for n in (eliminar or [])]
     os.makedirs(carpeta, exist_ok=True)
     base = _ruta_base(url)
     conn = _nueva_conexion(url)
-    total = len(descargar) + len(actualizar)
+    total = len(descargar) + len(actualizar) + len(eliminar)
     hecho = 0
     listos = []
     actualizados = []
+    eliminados = []
+
+    for nombre in eliminar:
+        ruta = os.path.join(carpeta, nombre)
+        try:
+            if os.path.isfile(ruta):
+                os.remove(ruta)
+        except OSError as e:
+            raise RemoteError(f"No se pudo eliminar {nombre}: {e}")
+        eliminados.append(nombre)
+        hecho += 1
+        if progress_cb:
+            progress_cb(hecho, total, nombre)
 
     def bajar(nombre):
         nonlocal conn
@@ -168,4 +183,4 @@ def sync_from_remote(url, carpeta, descargar, actualizar, progress_cb=None):
             conn.close()
         except Exception:
             pass
-    return listos, actualizados
+    return listos, actualizados, eliminados
