@@ -20,7 +20,7 @@ import version
 TITULO = "Instalador de Mods de Minecraft"
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 DEFAULT_B = os.path.join(APPDATA, ".minecraft", "mods")
-TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel", "update_listo")
+TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel", "update_listo", "upd_check")
 
 
 class TaskQueue:
@@ -156,6 +156,9 @@ class App(tk.Tk):
         fila_upd = ttk.Frame(frm)
         fila_upd.grid(row=7, column=0, sticky="ew", pady=(14, 0))
         ttk.Label(fila_upd, text="Versión " + version.APP_VERSION).pack(side="left")
+        self.btn_actualizar = ttk.Button(
+            fila_upd, text="Actualizar ahora", command=self._actualizar_ya
+        )
         self.btn_update = ttk.Button(
             fila_upd, text="Buscar actualizaciones", command=self._buscar_actualizaciones
         )
@@ -732,17 +735,32 @@ class App(tk.Tk):
         t = msg["tipo"]
         if t == "upd_check":
             self.btn_update.config(state="normal")
-            if msg.get("error") and self._upd_silencioso:
-                return
             if msg.get("hay"):
+                self._upd_info = msg["info"]
                 v = msg["info"]["version"]
-                self.lbl_update.config(text=f"Nueva versión {v} disponible.", foreground="#0a0")
-                if not self._upd_silencioso:
-                    self._mostrar_pregunta_actualizar(msg["info"])
-            else:
+                if not self.btn_actualizar.winfo_ismapped():
+                    self.btn_actualizar.pack(side="right", padx=(0, 6))
                 self.lbl_update.config(
-                    text="Estás en la última versión." if not self._upd_silencioso else ""
+                    text=f"Nueva versión {v} disponible. Pulsa 'Actualizar ahora'.",
+                    foreground="#0a0",
                 )
+                self._mostrar_pregunta_actualizar(msg["info"])
+            else:
+                self._upd_info = None
+                if self.btn_actualizar.winfo_ismapped():
+                    self.btn_actualizar.pack_forget()
+                if msg.get("error"):
+                    if self._upd_silencioso:
+                        self.lbl_update.config(text="")
+                    else:
+                        self.lbl_update.config(text="")
+                        self._mostrar_mensaje(
+                            f"No se pudo comprobar actualizaciones:\n\n{msg['error']}", ok=False
+                        )
+                else:
+                    self.lbl_update.config(
+                        text="Estás en la última versión." if not self._upd_silencioso else ""
+                    )
         elif t == "update_progreso":
             self.progress_upd.config(value=msg["pct"])
             self.lbl_update.config(text=f"Descargando la actualización... {int(msg['pct'])}%")
@@ -754,16 +772,25 @@ class App(tk.Tk):
             self._aplicar_cambio(msg["nuevo_dir"])
         elif t == "error":
             self.btn_update.config(state="normal")
+            self._upd_info = None
+            if self.btn_actualizar.winfo_ismapped():
+                self.btn_actualizar.pack_forget()
             self.progress_upd.config(value=0)
             self.lbl_update.config(text="", foreground="#333")
             self._mostrar_mensaje(msg["detalle"], ok=False)
 
+    def _actualizar_ya(self):
+        if self._upd_info and not self.task_updates.busy:
+            self._mostrar_pregunta_actualizar(self._upd_info)
+
     def _mostrar_pregunta_actualizar(self, info):
         if messagebox.askyesno(
             TITULO,
-            f"Hay una nueva versión ({info['version']}).\n\n¿Descargar e instalar ahora?",
+            f"Hay una nueva versión ({info['version']}).\n\n"
+            "¿Descargar e instalar ahora?\n\n"
+            "La aplicación se cerrará y se reiniciará automáticamente al terminar.",
         ):
-            self._aplicar_actualizacion(info)
+            self.after(0, lambda i=info: self._aplicar_actualizacion(i))
 
     def _aplicar_actualizacion(self, info):
         if self.task_updates.busy:
