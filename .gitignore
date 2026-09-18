@@ -1,0 +1,17 @@
+# Entorno virtual
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
