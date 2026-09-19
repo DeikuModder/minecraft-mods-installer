@@ -1,6 +1,8 @@
 import http.client
 import json
 import os
+import socket
+import ssl
 import time
 import urllib.parse
 
@@ -21,6 +23,53 @@ class _HttpError(RemoteError):
         super().__init__(f"HTTP {status} al descargar {nombre}")
 
 
+def _direcciones(host, puerto):
+    try:
+        infos = socket.getaddrinfo(host, puerto, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise RemoteError(f"No se pudo resolver el origen: {host} ({e})") from e
+    infos.sort(key=lambda i: 0 if ":" not in i[4][0] else 1)
+    return infos
+
+
+class _ConexionHTTPS(http.client.HTTPSConnection):
+    def connect(self):
+        contexto = self._context
+        if contexto is None:
+            contexto = ssl.create_default_context()
+        ultimo = None
+        for _, __, __, __, saddr in _direcciones(self.host, self.port):
+            try:
+                s = socket.create_connection(saddr, self.timeout, self.source_address)
+                self.sock = contexto.wrap_socket(
+                    s, server_hostname=getattr(self, "_server_hostname", None) or self.host
+                )
+                return
+            except OSError as e:
+                ultimo = e
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        raise ultimo or OSError("No se pudo conectar al origen.")
+
+
+class _ConexionHTTP(http.client.HTTPConnection):
+    def connect(self):
+        ultimo = None
+        for _, __, __, __, saddr in _direcciones(self.host, self.port):
+            try:
+                self.sock = socket.create_connection(saddr, self.timeout, self.source_address)
+                return
+            except OSError as e:
+                ultimo = e
+                try:
+                    self.sock.close()
+                except Exception:
+                    pass
+        raise ultimo or OSError("No se pudo conectar al origen.")
+
+
 def _datos(url):
     u = urllib.parse.urlsplit((url or "").strip().rstrip("/"))
     if u.scheme not in ("http", "https") or not u.hostname:
@@ -31,8 +80,8 @@ def _datos(url):
 def _nueva_conexion(url):
     u = _datos(url)
     if u.scheme == "https":
-        return http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=TIMEOUT)
-    return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=TIMEOUT)
+        return _ConexionHTTPS(u.hostname, u.port or 443, timeout=TIMEOUT)
+    return _ConexionHTTP(u.hostname, u.port or 80, timeout=TIMEOUT)
 
 
 def _ruta_base(url):
@@ -47,22 +96,22 @@ def fetch_manifest(url):
             conn.request(
                 "GET",
                 _ruta_base(url) + "/manifest",
-                headers={"User-Agent": UA, "Accept-Encoding": "identity"},
+                headers={"User-Agent": UA, "Accept-Encoding": "identity", "Connection": "close"},
             )
             r = conn.getresponse()
             if r.status == 200:
                 payload = json.loads(r.read().decode("utf-8"))
                 return [m for m in payload.get("mods", []) if m.get("name")]
             if r.status in RETRIABLE:
-                ultimo = f"HTTP {r.status} al consultar el origen."
-                time.sleep(1.5)
+                ultimo = f"HTTP {r.status} al consultar el origen.\nURL usada: {url}"
+                _espera_reintento(intento)
                 continue
-            raise RemoteError(f"HTTP {r.status} al consultar el origen.")
+            raise RemoteError(f"HTTP {r.status} al consultar el origen.\nURL usada: {url}")
         except RemoteError:
             raise
         except Exception as e:
-            ultimo = f"No se pudo consultar el origen: {e}"
-            time.sleep(1.5)
+            ultimo = f"No se pudo consultar el origen: {e}\nURL usada: {url}"
+            _espera_reintento(intento)
         finally:
             try:
                 conn.close()
