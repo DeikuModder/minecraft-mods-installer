@@ -74,7 +74,7 @@ class App(tk.Tk):
         self._after_guardar = None
         self.var_a = tk.StringVar(value=cfg.get("folder_a", ""))
         self.var_b = tk.StringVar(value=cfg.get("folder_b") or DEFAULT_B)
-        self.var_origen = tk.StringVar(value=cfg.get("last_origin_url", ""))
+        self.var_origen = tk.StringVar(value=(cfg.get("last_origin_url", "") or "").strip().rstrip("/"))
         self.var_hostname = tk.StringVar(value=cfg.get("hostname", ""))
         self.var_url_publica = tk.StringVar()
 
@@ -95,6 +95,8 @@ class App(tk.Tk):
         self.var_b.trace_add("write", lambda *_: self._actualizar_boton())
         for var in (self.var_a, self.var_b, self.var_hostname, self.var_origen):
             var.trace_add("write", lambda *_: self._programar_guardado())
+        self.var_hostname.trace_add("write", lambda *_: self._normalizar_origen(hostname=True))
+        self.var_origen.trace_add("write", lambda *_: self._normalizar_origen(hostname=False))
         self._actualizar_boton()
         self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
         self._limpiar_temporales_updates()
@@ -335,7 +337,7 @@ class App(tk.Tk):
         (messagebox.showinfo if ok else messagebox.showerror)(TITULO, text)
 
     def _copiar_url(self):
-        url = self.var_url_publica.get()
+        url = self.var_url_publica.get().rstrip("/")
         if url:
             self.clipboard_clear()
             self.clipboard_append(url)
@@ -358,14 +360,21 @@ class App(tk.Tk):
             self.after_cancel(self._after_guardar)
         self._after_guardar = self.after(800, self._guardar_campos)
 
+    def _normalizar_origen(self, hostname=False):
+        var = self.var_hostname if hostname else self.var_origen
+        v = var.get()
+        n = v.strip().rstrip("/")
+        if n != v:
+            var.set(n)
+
     def _guardar_campos(self):
         self._after_guardar = None
         config.save(
             {
                 "folder_a": self.var_a.get().strip(),
                 "folder_b": self.var_b.get().strip(),
-                "hostname": self.var_hostname.get().strip(),
-                "last_origin_url": self.var_origen.get().strip(),
+                "hostname": self.var_hostname.get().strip().rstrip("/"),
+                "last_origin_url": self.var_origen.get().strip().rstrip("/"),
                 "role": self.rol,
             }
         )
@@ -493,6 +502,7 @@ class App(tk.Tk):
                 ok=False,
             )
             return
+        hostname = hostname.rstrip("/")
         b = self.var_b.get().strip()
         self.btn_iniciar.config(state="disabled")
         self.lbl_estado_servidor.config(text="Preparando servidor y túnel...")
@@ -534,7 +544,7 @@ class App(tk.Tk):
         cola.put(
             {
                 "tipo": "servidor",
-                "url": "https://" + hostname,
+                "url": "https://" + hostname.rstrip("/"),
                 "mods": sync.count_files(b),
             }
         )
@@ -976,6 +986,14 @@ def _modo_updater(nuevo, destino, pid_orig):
     try:
         exe = updates.aplicar_upgrade(nuevo, destino)
     except Exception:
+        try:
+            subprocess.Popen(
+                [os.path.join(destino, "InstaladorMods.exe")],
+                creationflags=flags,
+                close_fds=True,
+            )
+        except Exception:
+            pass
         return 3
     flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     subprocess.Popen([exe], creationflags=flags, close_fds=True)

@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 2, 0),
-    prodvers=(1, 4, 2, 0),
+    filevers=(1, 4, 3, 0),
+    prodvers=(1, 4, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Instalador de Mods'),
             StringStruct('FileDescription', 'Instalador y sincronizador de mods de Minecraft'),
-            StringStruct('FileVersion', '1.4.2.0'),
+            StringStruct('FileVersion', '1.4.3.0'),
             StringStruct('InternalName', 'InstaladorMods'),
             StringStruct('LegalCopyright', ''),
             StringStruct('OriginalFilename', 'InstaladorMods.exe'),
             StringStruct('ProductName', 'Instalador de Mods de Minecraft'),
-            StringStruct('ProductVersion', '1.4.2.0')
+            StringStruct('ProductVersion', '1.4.3.0')
           ]
         )
       ]

@@ -127,20 +127,33 @@ def ubicar_exe(raiz):
 def aplicar_upgrade(nuevo, destino):
     if not os.path.isfile(os.path.join(nuevo, "InstaladorMods.exe")):
         raise UpdateError("La nueva versión no contiene InstaladorMods.exe.")
+    if not os.path.isdir(destino):
+        raise UpdateError("No se encontró la instalación actual.")
     backup = destino + ".backup"
     shutil.rmtree(backup, ignore_errors=True)
     try:
-        if os.path.isdir(destino):
-            os.rename(destino, backup)
-        os.rename(nuevo, destino)
-        shutil.rmtree(backup, ignore_errors=True)
-        return os.path.join(destino, "InstaladorMods.exe")
+        shutil.move(destino, backup)
+    except OSError as e:
+        raise UpdateError(
+            "No se pudo sustituir la instalación actual. "
+            "Cierra el programa y el antivirus y vuelve a intentarlo."
+        ) from e
+    try:
+        shutil.move(nuevo, destino)
     except Exception:
         try:
-            if os.path.isdir(destino):
-                shutil.rmtree(destino, ignore_errors=True)
-            if os.path.isdir(backup) and not os.path.isdir(destino):
-                os.rename(backup, destino)
+            if not os.path.isdir(destino) and os.path.isdir(backup):
+                shutil.move(backup, destino)
         except Exception:
             pass
         raise
+    if not os.path.isfile(os.path.join(destino, "InstaladorMods.exe")):
+        try:
+            shutil.rmtree(destino, ignore_errors=True)
+            if os.path.isdir(backup) and not os.path.isdir(destino):
+                shutil.move(backup, destino)
+        except Exception:
+            pass
+        raise UpdateError("La actualización no se pudo aplicar correctamente.")
+    shutil.rmtree(backup, ignore_errors=True)
+    return os.path.join(destino, "InstaladorMods.exe")
