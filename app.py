@@ -20,7 +20,7 @@ import version
 TITULO = "Instalador de Mods de Minecraft"
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 DEFAULT_B = os.path.join(APPDATA, ".minecraft", "mods")
-TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel", "update_listo", "upd_check")
+TERMINAL = ("terminado", "error", "respuesta", "resumen", "servidor", "tunel", "update_listo", "upd_check", "uno_ok")
 
 
 class TaskQueue:
@@ -82,6 +82,7 @@ class App(tk.Tk):
         self._tunnel_proc = None
         self._servidor_activo = False
         self._cambios = None
+        self._manifest = []
 
         self.task_local = TaskQueue(self, self._evento_local)
         self.task_sync = TaskQueue(self, self._evento_sync)
@@ -256,6 +257,9 @@ class App(tk.Tk):
         scroll.config(command=self.lista_mods.yview)
         scroll.pack(side="right", fill="y")
         self.lista_mods.pack(side="left", fill="both", expand=True)
+        self.lista_mods.bind("<Button-3>", self._menu_derecho_mods)
+        self.menu_mod = tk.Menu(self, tearoff=0)
+        self.menu_mod.add_command(label="Descargar este mod ahora", command=self._descargar_mod_seleccionado)
 
         sec_borrar = ttk.LabelFrame(sec_b, text="Mods que se eliminarán al sincronizar:", padding=6)
         self.sec_borrar = sec_borrar
@@ -591,6 +595,7 @@ class App(tk.Tk):
                 "eliminar": eliminar,
                 "iguales": iguales,
                 "mods": len(manifest),
+                "manifest": manifest,
             }
         )
 
@@ -634,6 +639,84 @@ class App(tk.Tk):
             }
         )
 
+    def _menu_derecho_mods(self, event):
+        idx = self.lista_mods.nearest(event.y)
+        if idx < 0 or idx >= self.lista_mods.size():
+            return
+        estado = "disabled" if self.task_sync.busy else "normal"
+        self.menu_mod.entryconfig(0, state=estado)
+        self.lista_mods.selection_clear(0, tk.END)
+        self.lista_mods.selection_set(idx)
+        self.lista_mods.activate(idx)
+        try:
+            self.menu_mod.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu_mod.grab_release()
+
+    def _descargar_mod_seleccionado(self):
+        sel = self.lista_mods.curselection()
+        if not sel:
+            return
+        self._descargar_mod(self.lista_mods.get(sel[0]))
+
+    def _descargar_mod(self, nombre):
+        if self.task_sync.busy:
+            return
+        b = self._validar_b()
+        if b is None:
+            return
+        url = self.var_origen.get().strip()
+        if not url:
+            self._mostrar_mensaje("Escribe la URL del origen (ej. https://mods.tudominio.com).", ok=False)
+            return
+        self.btn_sincronizar.config(state="disabled")
+        self.btn_comprobar.config(state="disabled")
+        self.progress_sync.config(value=0)
+        self.lbl_archivo_sync.config(text="")
+        self.lbl_estado_sync.config(text="Descargando...")
+        self._tarea = "descargar_uno"
+        self._guardar_campos()
+        self.task_sync.submit(
+            lambda cola, u=url, fb=b, n=nombre: self._trabajo_descargar_uno(cola, u, fb, n)
+        )
+
+    def _trabajo_descargar_uno(self, cola, url, b, nombre):
+        def cb(leido, total):
+            cola.put(
+                {
+                    "tipo": "progreso_uno",
+                    "pct": (100.0 * leido / total) if total else 0.0,
+                    "nombre": nombre,
+                }
+            )
+
+        remote.descargar_uno(url, b, nombre, progreso=cb)
+        locales = sync.scan_sizes(b) if os.path.isdir(b) else {}
+        cola.put({"tipo": "uno_ok", "nombre": nombre, "locales": locales})
+
+    def _pintar_resultado(self, desc, act, eli):
+        if desc or act or eli:
+            partes = []
+            if desc:
+                partes.append(f"{len(desc)} mods nuevos encontrados")
+            if act:
+                partes.append(f"{len(act)} para actualizar")
+            if eli:
+                partes.append(f"{len(eli)} para eliminar")
+            self.lbl_resultado.config(text=", ".join(partes) + ".")
+        else:
+            self.lbl_resultado.config(text="No hay cambios: los mods están al día.")
+        self.lista_mods.delete(0, tk.END)
+        for nombre in desc:
+            self.lista_mods.insert(tk.END, nombre)
+        self.lista_borrar.delete(0, tk.END)
+        for nombre in eli:
+            self.lista_borrar.insert(tk.END, nombre)
+        if eli:
+            self.sec_borrar.grid()
+        else:
+            self.sec_borrar.grid_remove()
+
     def _evento_sync(self, msg):
         t = msg["tipo"]
         if t == "aviso":
@@ -647,34 +730,29 @@ class App(tk.Tk):
             self.lbl_estado_sync.config(text="Descargando...")
             self.lbl_archivo_sync.config(text=f"{msg['archivo']} ({msg['hecho']}/{total})")
         elif t == "respuesta":
+            self._manifest = msg.get("manifest") or []
             desc, act, eli = msg["descargar"], msg["actualizar"], msg["eliminar"]
             self._cambios = (desc, act, eli)
-            if desc or act or eli:
-                partes = []
-                if desc:
-                    partes.append(f"{len(desc)} mods nuevos encontrados")
-                if act:
-                    partes.append(f"{len(act)} para actualizar")
-                if eli:
-                    partes.append(f"{len(eli)} para eliminar")
-                self.lbl_resultado.config(text=", ".join(partes) + ".")
-            else:
-                self.lbl_resultado.config(text="No hay cambios: los mods están al día.")
-            self.lista_mods.delete(0, tk.END)
-            for nombre in desc:
-                self.lista_mods.insert(tk.END, nombre)
-            self.lista_borrar.delete(0, tk.END)
-            for nombre in eli:
-                self.lista_borrar.insert(tk.END, nombre)
-            if eli:
-                self.sec_borrar.grid()
-            else:
-                self.sec_borrar.grid_remove()
+            self._pintar_resultado(desc, act, eli)
             self._rearmar_sync()
+        elif t == "progreso_uno":
+            self.progress_sync.config(value=msg["pct"])
+            self.lbl_estado_sync.config(text="Descargando...")
+            self.lbl_archivo_sync.config(
+                text=f"{msg['nombre']} ({int(msg['pct'])}% de la descarga individual)"
+            )
+        elif t == "uno_ok":
+            self.progress_sync.config(value=100)
+            desc, act, eli, iguales = remote.compare(msg["locales"], self._manifest)
+            self._cambios = (desc, act, eli)
+            self._pintar_resultado(desc, act, eli)
+            self._rearmar_sync()
+            self._mostrar_mensaje(f"Descargado: {msg['nombre']}")
         elif t == "resumen":
             self.progress_sync.config(value=100)
             self.sec_borrar.grid_remove()
             self._cambios = None
+            self._manifest = []
             self._rearmar_sync()
             eliminados = msg.get("eliminados") or []
             texto = (

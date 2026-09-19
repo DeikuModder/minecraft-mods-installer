@@ -8,7 +8,7 @@ TIMEOUT = 300
 UA = "InstaladorMods/1.0"
 CHUNK = 262144
 RETRIABLE = (502, 503, 504)
-REINTENTOS = 3
+REINTENTOS = 5
 
 
 class RemoteError(Exception):
@@ -80,36 +80,70 @@ def compare(locales, manifest):
     return descargar, actualizar, eliminar, iguales
 
 
-def _bajar_por_conn(conn, base, nombre, destino):
+def _bajar_por_conn(conn, base, nombre, destino, progreso=None):
     conn.request(
         "GET",
         base + "/mods/" + urllib.parse.quote(nombre),
-        headers={"User-Agent": UA, "Accept-Encoding": "identity"},
+        headers={"User-Agent": UA, "Accept-Encoding": "identity", "Connection": "close"},
     )
     r = conn.getresponse()
     if r.status != 200:
         raise _HttpError(r.status, nombre)
+    total = 0
+    try:
+        total = int(r.getheader("Content-Length") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    leido = 0
     with open(destino, "wb") as f:
         while True:
             data = r.read(CHUNK)
             if not data:
                 break
             f.write(data)
+            leido += len(data)
+            if progreso:
+                progreso(leido, total)
 
 
-def _download(url, nombre, destino):
+def _download(url, nombre, destino, progreso=None):
     conn = _nueva_conexion(url)
     try:
-        _bajar_por_conn(conn, _ruta_base(url), nombre, destino)
+        _bajar_por_conn(conn, _ruta_base(url), nombre, destino, progreso)
     finally:
         conn.close()
+
+
+def _espera_reintento(intento):
+    time.sleep(min(1.5 * 2 ** (intento - 1), 12))
+
+
+def descargar_uno(url, carpeta, nombre, progreso=None):
+    os.makedirs(carpeta, exist_ok=True)
+    parcial = os.path.join(carpeta, nombre + ".instalador.part")
+    try:
+        for intento in range(1, REINTENTOS + 1):
+            try:
+                _download(url, nombre, parcial, progreso)
+                os.replace(parcial, os.path.join(carpeta, nombre))
+                return
+            except _HttpError as e:
+                if e.status not in RETRIABLE or intento >= REINTENTOS:
+                    raise
+            except (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionError, OSError) as e:
+                if intento >= REINTENTOS:
+                    raise RemoteError(f"No se pudo descargar {nombre}: la conexión falló ({e}).")
+            _espera_reintento(intento)
+    finally:
+        try:
+            os.remove(parcial)
+        except OSError:
+            pass
 
 
 def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progress_cb=None):
     eliminar = [n for n in (eliminar or [])]
     os.makedirs(carpeta, exist_ok=True)
-    base = _ruta_base(url)
-    conn = _nueva_conexion(url)
     total = len(descargar) + len(actualizar) + len(eliminar)
     hecho = 0
     listos = []
@@ -129,58 +163,36 @@ def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progres
             progress_cb(hecho, total, nombre)
 
     def bajar(nombre):
-        nonlocal conn
         parcial = os.path.join(carpeta, nombre + ".instalador.part")
-        intentos = 0
-        while True:
-            intentos += 1
-            try:
-                _bajar_por_conn(conn, base, nombre, parcial)
-                os.replace(parcial, os.path.join(carpeta, nombre))
-                return
-            except _HttpError as e:
-                if e.status in RETRIABLE and intentos < REINTENTOS:
-                    time.sleep(1.5)
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    conn = _nueva_conexion(url)
-                    continue
-                raise
-            except RemoteError:
-                raise
-            except (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionError, OSError):
-                if intentos >= REINTENTOS:
-                    raise RemoteError(f"No se pudo descargar {nombre}: la conexión falló.")
-                time.sleep(1.0)
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                conn = _nueva_conexion(url)
-            finally:
-                try:
-                    os.remove(parcial)
-                except OSError:
-                    pass
-
-    try:
-        for nombre in descargar:
-            bajar(nombre)
-            listos.append(nombre)
-            hecho += 1
-            if progress_cb:
-                progress_cb(hecho, total, nombre)
-        for nombre in actualizar:
-            bajar(nombre)
-            actualizados.append(nombre)
-            hecho += 1
-            if progress_cb:
-                progress_cb(hecho, total, nombre)
-    finally:
         try:
-            conn.close()
-        except Exception:
-            pass
+            for intento in range(1, REINTENTOS + 1):
+                try:
+                    _download(url, nombre, parcial)
+                    os.replace(parcial, os.path.join(carpeta, nombre))
+                    return
+                except _HttpError as e:
+                    if e.status not in RETRIABLE or intento >= REINTENTOS:
+                        raise
+                except (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionError, OSError) as e:
+                    if intento >= REINTENTOS:
+                        raise RemoteError(f"No se pudo descargar {nombre}: la conexión falló ({e}).")
+                _espera_reintento(intento)
+        finally:
+            try:
+                os.remove(parcial)
+            except OSError:
+                pass
+
+    for nombre in descargar:
+        bajar(nombre)
+        listos.append(nombre)
+        hecho += 1
+        if progress_cb:
+            progress_cb(hecho, total, nombre)
+    for nombre in actualizar:
+        bajar(nombre)
+        actualizados.append(nombre)
+        hecho += 1
+        if progress_cb:
+            progress_cb(hecho, total, nombre)
     return listos, actualizados, eliminados
