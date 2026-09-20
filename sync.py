@@ -32,6 +32,29 @@ def plan_sync(src, dst):
     return to_copy, to_overwrite
 
 
+def plan_delete(src, dst):
+    src_sizes = scan_sizes(src)
+    dst_sizes = scan_sizes(dst) if os.path.isdir(dst) else {}
+    return sorted(
+        n for n in dst_sizes if n.lower().endswith(".jar") and n not in src_sizes
+    )
+
+
+def delete_files(dst, names, progress_cb=None):
+    borrados = []
+    for nombre in names:
+        ruta = os.path.join(dst, nombre)
+        try:
+            if os.path.isfile(ruta):
+                os.remove(ruta)
+        except OSError as e:
+            raise OSError(f"No se pudo eliminar {nombre}: {e}") from e
+        borrados.append(nombre)
+        if progress_cb:
+            progress_cb(len(borrados), len(names), nombre)
+    return borrados
+
+
 def execute_plan(src, dst, to_copy, to_overwrite, progress_cb=None):
     if not os.path.isdir(dst):
         os.makedirs(dst)

@@ -77,6 +77,7 @@ class App(tk.Tk):
         self.var_origen = tk.StringVar(value=(cfg.get("last_origin_url", "") or "").strip().rstrip("/"))
         self.var_hostname = tk.StringVar(value=cfg.get("hostname", ""))
         self.var_url_publica = tk.StringVar()
+        self._borrar_extra = tk.BooleanVar(value=True)
 
         self._server = None
         self._tunnel_proc = None
@@ -139,7 +140,7 @@ class App(tk.Tk):
             row=2, column=0, sticky="w", pady=(0, 4)
         )
         fila_b = ttk.Frame(frm)
-        fila_b.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+        fila_b.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         ttk.Entry(fila_b, textvariable=self.var_b, width=50).pack(
             side="left", fill="x", expand=True
         )
@@ -147,17 +148,23 @@ class App(tk.Tk):
             side="left", padx=(6, 0)
         )
 
+        ttk.Checkbutton(
+            frm,
+            text="Eliminar de B los mods (.jar) que no estén en A",
+            variable=self._borrar_extra,
+        ).grid(row=4, column=0, sticky="w", pady=(0, 10))
+
         self.btn = ttk.Button(frm, command=self._ejecutar, width=30)
-        self.btn.grid(row=4, column=0, sticky="ew")
+        self.btn.grid(row=5, column=0, sticky="ew")
 
         self.progress = ttk.Progressbar(frm, mode="determinate", maximum=100, value=0)
-        self.progress.grid(row=5, column=0, sticky="ew", pady=(14, 6))
+        self.progress.grid(row=6, column=0, sticky="ew", pady=(14, 6))
 
         self.lbl_estado = ttk.Label(frm, text="", anchor="w", foreground="#555")
-        self.lbl_estado.grid(row=6, column=0, sticky="ew")
+        self.lbl_estado.grid(row=7, column=0, sticky="ew")
 
         fila_upd = ttk.Frame(frm)
-        fila_upd.grid(row=7, column=0, sticky="ew", pady=(14, 0))
+        fila_upd.grid(row=8, column=0, sticky="ew", pady=(14, 0))
         ttk.Label(fila_upd, text="Versión " + version.APP_VERSION).pack(side="left")
         self.btn_actualizar = ttk.Button(
             fila_upd, text="Actualizar ahora", command=self._actualizar_ya
@@ -168,10 +175,10 @@ class App(tk.Tk):
         self.btn_update.pack(side="right")
 
         self.lbl_update = ttk.Label(frm, text="", anchor="w", foreground="#333")
-        self.lbl_update.grid(row=8, column=0, sticky="ew", pady=(4, 0))
+        self.lbl_update.grid(row=9, column=0, sticky="ew", pady=(4, 0))
 
         self.progress_upd = ttk.Progressbar(frm, mode="determinate", maximum=100, value=0)
-        self.progress_upd.grid(row=9, column=0, sticky="ew", pady=(4, 0))
+        self.progress_upd.grid(row=10, column=0, sticky="ew", pady=(4, 0))
 
     def _crear_ui_sync(self):
         barra = ttk.Frame(self.tab_sync)
@@ -412,29 +419,60 @@ class App(tk.Tk):
         self.btn.config(state="disabled")
         self.progress.config(value=0)
         self.lbl_estado.config(text="Comparando carpetas...")
-        if not self.task_local.submit(lambda cola, a=a, b=b: self._trabajo_local(cola, a, b)):
+        borrar = self._borrar_extra.get()
+        if not self.task_local.submit(
+            lambda cola, a=a, b=b, br=borrar: self._trabajo_local(cola, a, b, br)
+        ):
             self.btn.config(state="normal")
 
-    def _trabajo_local(self, cola, a, b):
+    def _trabajo_local(self, cola, a, b, borrar=True):
         src = sync.scan_sizes(a)
         dst = sync.scan_sizes(b) if os.path.isdir(b) else {}
         to_copy, to_overwrite = sync.plan_sync(a, b)
-        total = len(to_copy) + len(to_overwrite)
+        eliminar = sync.plan_delete(a, b) if borrar else []
+        total = len(to_copy) + len(to_overwrite) + len(eliminar)
         iguales = sum(1 for n, s in src.items() if n in dst and dst[n] == s)
         if total == 0:
-            cola.put({"tipo": "resumen", "instalados": 0, "actualizados": 0, "presentes": iguales})
+            cola.put(
+                {
+                    "tipo": "resumen",
+                    "instalados": 0,
+                    "actualizados": 0,
+                    "presentes": iguales,
+                    "eliminados": 0,
+                }
+            )
             return
 
-        def cb(done, total, name):
-            cola.put({"tipo": "progreso", "hecho": done, "total": total, "archivo": name})
+        def cb(done, total, name, accion="Copiando"):
+            cola.put(
+                {
+                    "tipo": "progreso",
+                    "hecho": done,
+                    "total": total,
+                    "archivo": name,
+                    "accion": accion,
+                }
+            )
 
-        r = sync.execute_plan(a, b, to_copy, to_overwrite, progress_cb=cb)
+        hecho = 0
+        if eliminar:
+            ban = sync.delete_files(
+                b,
+                eliminar,
+                progress_cb=lambda d, t, n: cb(d, total, n, accion="Borrando"),
+            )
+            hecho += len(ban)
+        r = sync.execute_plan(
+            a, b, to_copy, to_overwrite, progress_cb=lambda d, t, n: cb(hecho + d, total, n)
+        )
         cola.put(
             {
                 "tipo": "resumen",
                 "instalados": len(r.installed),
                 "actualizados": len(r.updated),
                 "presentes": iguales,
+                "eliminados": hecho,
             }
         )
 
@@ -444,7 +482,7 @@ class App(tk.Tk):
             total = msg["total"]
             pct = min(100.0, (msg["hecho"] / total) * 100.0) if total else 0.0
             self.progress.config(value=pct)
-            self.lbl_estado.config(text=f"Copiando: {msg['archivo']} ({msg['hecho']}/{total})")
+            self.lbl_estado.config(text=f"{msg.get('accion', 'Copiando')}: {msg['archivo']} ({msg['hecho']}/{msg['total']})")
         elif t == "resumen":
             self.progress.config(value=100)
             self.btn.config(state="normal")
@@ -453,7 +491,8 @@ class App(tk.Tk):
                 f"¡Listo!\n\n"
                 f"Instalados: {msg['instalados']}\n"
                 f"Actualizados: {msg['actualizados']}\n"
-                f"Ya presentes: {msg['presentes']}"
+                f"Ya presentes: {msg['presentes']}\n"
+                f"Eliminados: {msg['eliminados']}"
             )
         elif t == "error":
             self.btn.config(state="normal")
