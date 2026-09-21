@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import random
 import socket
 import ssl
 import time
@@ -11,6 +12,8 @@ UA = "InstaladorMods/1.0"
 CHUNK = 262144
 RETRIABLE = (502, 503, 504)
 REINTENTOS = 5
+COLA_MAX_INTENTOS = 40
+COLA_MAX_SEGUNDOS = 180.0
 
 
 class RemoteError(Exception):
@@ -18,8 +21,9 @@ class RemoteError(Exception):
 
 
 class _HttpError(RemoteError):
-    def __init__(self, status, nombre):
+    def __init__(self, status, nombre, retry_after=0.0):
         self.status = status
+        self.retry_after = retry_after
         super().__init__(f"HTTP {status} al descargar {nombre}")
 
 
@@ -137,7 +141,12 @@ def _bajar_por_conn(conn, base, nombre, destino, progreso=None):
     )
     r = conn.getresponse()
     if r.status != 200:
-        raise _HttpError(r.status, nombre)
+        retry_after = 0.0
+        try:
+            retry_after = float(r.getheader("Retry-After") or 0) or 0.0
+        except (TypeError, ValueError):
+            retry_after = 0.0
+        raise _HttpError(r.status, nombre, retry_after=retry_after)
     total = 0
     try:
         total = int(r.getheader("Content-Length") or 0)
@@ -167,22 +176,44 @@ def _espera_reintento(intento):
     time.sleep(min(1.5 * 2 ** (intento - 1), 12))
 
 
-def descargar_uno(url, carpeta, nombre, progreso=None):
-    os.makedirs(carpeta, exist_ok=True)
+def _espera_cola(retry_after):
+    base = max(1.0, float(retry_after or 0) or 1.0)
+    if base > 30:
+        base = 30
+    return base * (0.7 + 0.6 * random.random())
+
+
+def _puede_seguir_cola(inicio):
+    return time.monotonic() - inicio < COLA_MAX_SEGUNDOS
+
+
+def _bajar_con_reintentos(url, carpeta, nombre, progreso=None, cola_cb=None):
     parcial = os.path.join(carpeta, nombre + ".instalador.part")
+    inicio_cola = time.monotonic()
     try:
-        for intento in range(1, REINTENTOS + 1):
+        for intento in range(1, COLA_MAX_INTENTOS + 1):
             try:
                 _download(url, nombre, parcial, progreso)
                 os.replace(parcial, os.path.join(carpeta, nombre))
                 return
             except _HttpError as e:
+                if e.status == 503:
+                    if not _puede_seguir_cola(inicio_cola):
+                        raise RemoteError(
+                            "El servidor está ocupado (cola llena). "
+                            "Vuelve a intentarlo en unos minutos."
+                        ) from e
+                    if cola_cb:
+                        cola_cb(nombre)
+                    time.sleep(_espera_cola(e.retry_after))
+                    continue
                 if e.status not in RETRIABLE or intento >= REINTENTOS:
                     raise
             except (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionError, OSError) as e:
                 if intento >= REINTENTOS:
                     raise RemoteError(f"No se pudo descargar {nombre}: la conexión falló ({e}).")
             _espera_reintento(intento)
+        raise RemoteError(f"No se pudo descargar {nombre}.")
     finally:
         try:
             os.remove(parcial)
@@ -190,7 +221,19 @@ def descargar_uno(url, carpeta, nombre, progreso=None):
             pass
 
 
-def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progress_cb=None):
+def descargar_uno(url, carpeta, nombre, progreso=None, cola_cb=None):
+    os.makedirs(carpeta, exist_ok=True)
+    _bajar_con_reintentos(url, carpeta, nombre, progreso, cola_cb)
+
+
+def ordenar_por_tamano(manifest, nombres):
+    sizes = {m["name"]: int(m.get("size") or 0) for m in manifest}
+    pendientes = sorted(n for n in nombres if n in sizes)
+    sin_tam = sorted(n for n in nombres if n not in sizes)
+    return sorted(pendientes, key=lambda n: sizes[n]) + sin_tam
+
+
+def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progress_cb=None, cola_cb=None):
     eliminar = [n for n in (eliminar or [])]
     os.makedirs(carpeta, exist_ok=True)
     total = len(descargar) + len(actualizar) + len(eliminar)
@@ -212,25 +255,7 @@ def sync_from_remote(url, carpeta, descargar, actualizar, eliminar=None, progres
             progress_cb(hecho, total, nombre)
 
     def bajar(nombre):
-        parcial = os.path.join(carpeta, nombre + ".instalador.part")
-        try:
-            for intento in range(1, REINTENTOS + 1):
-                try:
-                    _download(url, nombre, parcial)
-                    os.replace(parcial, os.path.join(carpeta, nombre))
-                    return
-                except _HttpError as e:
-                    if e.status not in RETRIABLE or intento >= REINTENTOS:
-                        raise
-                except (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionError, OSError) as e:
-                    if intento >= REINTENTOS:
-                        raise RemoteError(f"No se pudo descargar {nombre}: la conexión falló ({e}).")
-                _espera_reintento(intento)
-        finally:
-            try:
-                os.remove(parcial)
-            except OSError:
-                pass
+        _bajar_con_reintentos(url, carpeta, nombre, cola_cb=cola_cb)
 
     for nombre in descargar:
         bajar(nombre)

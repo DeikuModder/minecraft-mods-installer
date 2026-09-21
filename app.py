@@ -77,6 +77,9 @@ class App(tk.Tk):
         self.var_origen = tk.StringVar(value=(cfg.get("last_origin_url", "") or "").strip().rstrip("/"))
         self.var_hostname = tk.StringVar(value=cfg.get("hostname", ""))
         self.var_url_publica = tk.StringVar()
+        self.var_max_desc = tk.StringVar(value=str(cfg.get("max_downloads", 3)))
+        mbs = cfg.get("max_mb_s")
+        self.var_mb_s = tk.StringVar(value=(str(mbs) if mbs else ""))
         self._borrar_extra = tk.BooleanVar(value=True)
 
         self._server = None
@@ -223,10 +226,19 @@ class App(tk.Tk):
         )
         ttk.Button(fila_url, text="Copiar", command=self._copiar_url).pack(side="left", padx=(6, 0))
 
+        fila_limite = ttk.Frame(sec_a)
+        fila_limite.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(fila_limite, text="Descargas simultáneas:").pack(side="left")
+        ttk.Spinbox(
+            fila_limite, from_=1, to=8, textvariable=self.var_max_desc, width=4
+        ).pack(side="left", padx=(6, 12))
+        ttk.Label(fila_limite, text="MB/s máx. por descarga (vacío = sin límite):").pack(side="left")
+        ttk.Entry(fila_limite, textvariable=self.var_mb_s, width=8).pack(side="left", padx=(6, 0))
+
         self.lbl_downloads = ttk.Label(sec_a, text="0 descargas", foreground="#555")
-        self.lbl_downloads.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.lbl_downloads.grid(row=6, column=0, sticky="w", pady=(6, 0))
         self.lbl_estado_servidor = ttk.Label(sec_a, text="", anchor="w", foreground="#555")
-        self.lbl_estado_servidor.grid(row=5, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        self.lbl_estado_servidor.grid(row=6, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
 
     def _crear_ui_consumidor(self):
         sec_b = ttk.LabelFrame(self.tab_sync, text="Conectar a un origen (consumidor)", padding=10)
@@ -376,6 +388,20 @@ class App(tk.Tk):
 
     def _guardar_campos(self):
         self._after_guardar = None
+        maxd = self.var_max_desc.get().strip()
+        mbs = self.var_mb_s.get().strip()
+        try:
+            maxd_int = int(maxd) if maxd else 3
+            if maxd_int < 1:
+                maxd_int = 3
+        except ValueError:
+            maxd_int = 3
+        try:
+            mbs_f = float(mbs) if mbs else 0.0
+            if mbs_f < 0:
+                mbs_f = 0.0
+        except ValueError:
+            mbs_f = 0.0
         config.save(
             {
                 "folder_a": self.var_a.get().strip(),
@@ -383,6 +409,8 @@ class App(tk.Tk):
                 "hostname": self.var_hostname.get().strip().rstrip("/"),
                 "last_origin_url": self.var_origen.get().strip().rstrip("/"),
                 "role": self.rol,
+                "max_downloads": maxd_int,
+                "max_mb_s": mbs_f,
             }
         )
 
@@ -564,7 +592,12 @@ class App(tk.Tk):
         uuid = tunnel.preparar(exe, cfg["tunnel_name"], hostname, aviso=aviso)
         config.save({"hostname": hostname})
         aviso("Iniciando servidor HTTP local...")
-        srv = server.ModsServer(("127.0.0.1", 0), b)
+        srv = server.ModsServer(
+            ("127.0.0.1", 0),
+            b,
+            max_concurrentes=cfg.get("max_downloads", 3),
+            mb_s=cfg.get("max_mb_s", 0),
+        )
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         puerto = srv.server_address[1]
         self._server = srv
@@ -635,6 +668,8 @@ class App(tk.Tk):
             raise RuntimeError("El origen no tiene mods.")
         locales = sync.scan_sizes(b) if os.path.isdir(b) else {}
         descargar, actualizar, eliminar, iguales = remote.compare(locales, manifest)
+        descargar = remote.ordenar_por_tamano(manifest, descargar)
+        actualizar = remote.ordenar_por_tamano(manifest, actualizar)
         config.save({"last_origin_url": url})
         cola.put(
             {
@@ -676,8 +711,17 @@ class App(tk.Tk):
 
         if eliminar:
             cola.put({"tipo": "aviso_cliente", "texto": "Eliminando mods no presentes en el origen..."})
+
+        def cola_cb(nombre):
+            cola.put(
+                {
+                    "tipo": "aviso_cliente",
+                    "texto": f"Esperando turno (servidor ocupado) para descargar {nombre}...",
+                }
+            )
+
         listos, actualizados, eliminados = remote.sync_from_remote(
-            url, b, descargar, actualizar, eliminar, progress_cb=cb
+            url, b, descargar, actualizar, eliminar, progress_cb=cb, cola_cb=cola_cb
         )
         cola.put(
             {
@@ -739,7 +783,15 @@ class App(tk.Tk):
                 }
             )
 
-        remote.descargar_uno(url, b, nombre, progreso=cb)
+        def cola_cb(nombre_mod):
+            cola.put(
+                {
+                    "tipo": "aviso_cliente",
+                    "texto": f"Esperando turno (servidor ocupado) para descargar {nombre_mod}...",
+                }
+            )
+
+        remote.descargar_uno(url, b, nombre, progreso=cb, cola_cb=cola_cb)
         locales = sync.scan_sizes(b) if os.path.isdir(b) else {}
         cola.put({"tipo": "uno_ok", "nombre": nombre, "locales": locales})
 

@@ -12,6 +12,8 @@ DEFAULT = {
     "folder_b": "",
     "role": "anfitrion",
     "update_repo": "",
+    "max_downloads": 3,
+    "max_mb_s": 0,
 }
 
 
